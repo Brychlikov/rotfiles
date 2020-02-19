@@ -11,14 +11,12 @@ extern crate glob;
 extern crate chrono;
 use handlebars::Handlebars;
 use std::path::{Path, PathBuf};
-use std::error::Error;
 
 use std::io::prelude::*;
 use chrono::prelude::*;
 use std::fs::File;
 use serde_json::Value as Json;
 use std::ffi::OsString;
-use std::fmt;
 
 mod dropfile;
 mod config;
@@ -30,28 +28,30 @@ const HOMEPATH: &str = "/home/brych";
 // const WORKPATH: &str = "~/.local/share/rotfiles";
 //
 
-#[derive(Debug)]
-struct RotfilesError {
-    details: String,
-}
 
-impl fmt::Display for RotfilesError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "RotfilesError: {}", self.details)
-    }
-}
+pub mod errors {
+    error_chain! {
+        errors {
+            JsonConfigError(fname: String) {
+                description("Could not load JSON configuration file")
+                display("Could not load JSON configuration file for {}", fname)
+            }
 
-impl Error for RotfilesError {}
+            NotADotfile {
+                description("File targeted is not a dotfile (not located in $HOME and beggining with '.')")
+            }
 
-impl RotfilesError {
-    fn new(details: &str) -> Self {
-        Self {
-            details: details.to_owned()
+        }
+        foreign_links {
+            Io(std::io::Error);
+            SerdeJson(serde_json::Error);
+            HandlebarsTemplate(handlebars::TemplateFileError);
+            HandlebarsRender(handlebars::RenderError);
         }
     }
 }
 
-
+use errors::*;
 
 lazy_static! {
     static ref WORKPATH: &'static str = {
@@ -90,7 +90,14 @@ fn ensure_workpath_exists() -> std::io::Result<&'static str> {
     Ok(&s)
 }
 
-pub fn process_file<P, U>(template_path: P, result_path: U) -> Result<(), Box<dyn Error>>
+fn read_file<P: AsRef<Path>>(path: P) -> Result<String> {
+    let mut res = String::new();
+    let mut file = File::open(&path).chain_err(|| format!("Could not open file: {}", path.as_ref().display()))?;
+    file.read_to_string(&mut res).chain_err(|| format!("Could not read file: {}", path.as_ref().display()))?;
+    Ok(res)
+}
+
+pub fn process_file<P, U>(template_path: P, result_path: U) -> Result<()>
     where P: AsRef<Path>, U: AsRef<Path> {
     let mut handlebars = Handlebars::new();
 
@@ -101,12 +108,11 @@ pub fn process_file<P, U>(template_path: P, result_path: U) -> Result<(), Box<dy
     };
 
     debug!("Opening json file on path {:?}", json_path);
-    let mut json_file = File::open(json_path).expect("Cant find json file");
-    let mut contents = String::new();
-    json_file.read_to_string(&mut contents)?;
-    let data: Json = serde_json::from_str(&contents).expect("Can't parse json file");
+    let json_string = read_file(json_path)?;
+    let data: Json = serde_json::from_str(&json_string).chain_err(|| ErrorKind::JsonConfigError("Could not read json config".to_string()))?;
 
-    handlebars.register_template_file("file", template_path).expect("Can't compile template");
+    handlebars.register_template_file("file", &template_path)
+        .chain_err(|| format!("Could not parse template file: {}", template_path.as_ref().display()))?;
 
     if result_path.as_ref().exists() {
         backup_file(&result_path)?;
@@ -114,19 +120,19 @@ pub fn process_file<P, U>(template_path: P, result_path: U) -> Result<(), Box<dy
 
     let mut file = File::create(result_path)?;
     debug!("Writing template");
-    write!(file, "{}", handlebars.render("file", &data)?)?;
+    write!(file, "{}", handlebars.render("file", &data).chain_err(|| "Could not render template")?)?;
     
     Ok(())
 }
 
-fn backup_file<P>(path: P) -> std::io::Result<PathBuf> 
+fn backup_file<P>(path: P) -> Result<PathBuf> 
 where P: AsRef<Path> {
     let p = path.as_ref();
     let (mut file_name, ext) = match (p.file_stem(), p.extension()) {
         (Some(x), Some(y)) => (x.to_owned(), y.to_owned()),
         (None, Some(y)) => (OsString::new(), y.to_owned()),
         (Some(x), None) => (x.to_owned(), OsString::new()),
-        (None, None) => return Err(std::io::Error::new(std::io::ErrorKind::Other, "No filename on file to backup"))
+        (None, None) => return Err(std::io::Error::new(std::io::ErrorKind::Other, "No filename on file to backup").into())
     };
 
     let mut result_path = PathBuf::from(*BACKUPPATH);
@@ -137,19 +143,22 @@ where P: AsRef<Path> {
     result_path.set_extension(ext);
 
     debug!("Attempting backup of {:?} to {:?}", p, &result_path);
-    std::fs::copy(&path, &result_path)?;
+    std::fs::copy(&path, &result_path)
+        .chain_err(|| format!("Could not backup {} to {}", path.as_ref().display(), result_path.display()))?;
     debug!("Backup of {:?} to {:?} complete", p, &result_path);
 
     Ok(result_path)
 }
 
-pub fn add_file<P: AsRef<Path>> (path: P) -> Result<(), Box<dyn Error>> {
+pub fn add_file<P: AsRef<Path>> (path: P) -> Result<()> {
     debug!("Adding file {:?}", path.as_ref());
-    let result_path = dotfile_to_filename(&path)?;
-    ensure_parent_exists(&result_path)?;
+    let result_path = dotfile_to_filename(&path)
+        .chain_err(|| format!("Could not convert {} to filename to store", path.as_ref().display()))?;
+    ensure_parent_exists(&result_path).chain_err(|| format!("Cant create parents of {}", path.as_ref().display()))?;
     debug!("Attempting copy from {:?} to {:?}", path.as_ref(), &result_path);
-    std::fs::copy(&path, &result_path)?;
-    sanitize_file(&result_path)?;
+    std::fs::copy(&path, &result_path)
+        .chain_err(|| format!("Could not copy {} to {}", path.as_ref().display(), result_path.display()))?;
+    sanitize_file(&result_path).chain_err(|| format!("Error sanitizing {}", result_path.display()))?;
 
     let json_fname = {
         let mut p = result_path.as_os_str().to_owned();
@@ -158,27 +167,22 @@ pub fn add_file<P: AsRef<Path>> (path: P) -> Result<(), Box<dyn Error>> {
     };
 
     let json_value = json!({get_hostname(): true});
-    let mut json_file = File::create(json_fname)?;
-    write!(json_file, "{}", json_value.to_string())?;
-
+    let mut json_file = File::create(json_fname).chain_err(|| "Could not create json file")?;
+    write!(json_file, "{}", json_value.to_string()).chain_err(|| "Could not write to json file")?;
 
     Ok(())
 }
 
-fn ensure_parent_exists<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn Error>> {
-    let mut p = path.as_ref().parent().ok_or("Supplied path has no parent")?;
-    std::fs::create_dir_all(p)?;
+fn ensure_parent_exists<P: AsRef<Path>>(path: P) -> Result<()> {
+    let p = path.as_ref().parent().ok_or("Supplied path has no parent")?;
+    std::fs::create_dir_all(p).chain_err(|| "Could not create parent directories")?;
     Ok(())
 }
 
-fn sanitize_file<P: AsRef<Path>>(path: P) -> Result<(), Box<dyn Error>> {
-    let contents = {
-        let mut file = File::open(&path)?;
-        let mut c = String::new();
-        file.read_to_string(&mut c)?;
-        c.replace("{{", "\\{{").replace("}}", "\\}}")
-    };
-    let mut file = File::create(path)?;
+fn sanitize_file<P: AsRef<Path>>(path: P) -> Result<()> {
+    let contents = read_file(&path)?.replace("{{", "\\{{").replace("}}", "\\}}");
+    let mut file = File::create(&path)
+        .chain_err(|| format!("Could not overwrite file {} for sanitization", path.as_ref().display()))?;
     write!(file, "{}", contents)?;
     Ok(())
 }
@@ -193,13 +197,15 @@ fn get_hostname() -> String {
 pub fn files_to_process() -> impl Iterator<Item=PathBuf> {
     let glob_path = DOTPATH.to_owned() + "/**/*";
     glob::glob(&glob_path).expect("Incorrect path")
-        .filter_map(Result::ok)  // filter out non-readable files
+        .filter_map(std::result::Result::ok)  // filter out non-readable files
         .filter(|p| p.is_file() && !(p.extension().is_some() && p.extension().unwrap() == "json")) // filter out json files
 }
 
-fn filename_to_dotfile<P: AsRef<Path>>(path: P) -> Result<PathBuf, Box<dyn Error>> {
-    let p = path.as_ref().canonicalize()?;
-    let postfix_string = p.strip_prefix(DOTPATH)?.to_owned().into_os_string();
+fn filename_to_dotfile<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    dbg!(path.as_ref().display());
+    let p = path.as_ref().canonicalize().chain_err(|| "Path cannot be canonicalized")?;
+    dbg!(&p);
+    let postfix_string = p.strip_prefix(DOTPATH).chain_err(|| ErrorKind::NotADotfile)?.to_owned().into_os_string();
     let dotted = {
         let mut s = OsString::from(".");
          s.push(postfix_string);
@@ -209,26 +215,31 @@ fn filename_to_dotfile<P: AsRef<Path>>(path: P) -> Result<PathBuf, Box<dyn Error
     Ok(result_path)
 }
 
-fn dotfile_to_filename<P: AsRef<Path>>(path: P) -> Result<PathBuf, Box<dyn Error>> {
-    let p = path.as_ref().canonicalize()?;
-    let postfix_string = p.strip_prefix(HOMEPATH)?.to_owned().into_os_string().into_string().map_err(|_| "Path contains unvalid unicode")?;
+fn dotfile_to_filename<P: AsRef<Path>>(path: P) -> Result<PathBuf> {
+    let p = path.as_ref().canonicalize().chain_err(|| "Path cannot be canonicalized")?;
+    let postfix_string = p.strip_prefix(HOMEPATH).chain_err(|| ErrorKind::NotADotfile)?.to_owned().into_os_string().into_string().map_err(|_| "Path contains unvalid unicode")?;
     let undotted = match postfix_string.chars().nth(0) {
         Some('.') => &postfix_string[1..],
-        _ => return Err(format!("Path {:?} is not a dotfile", p).into())
+        _ => bail!(ErrorKind::NotADotfile)
     };
     let result_path = Path::new(DOTPATH).join(undotted);
     Ok(result_path)
     
 }
 
-pub fn process_all_files() -> Result<(), Box<dyn Error>> {
+pub fn process_all_files() -> Result<()> {
     for fname in files_to_process() {
         debug!("File processing loop entry on {:?}", fname);
         let result_fname = filename_to_dotfile(&fname)?;
         let res = process_file(&fname, &result_fname);
         match res {
             Ok(_) => {},
-            Err(e) => eprintln!("Could not process file: {:?}->{:?}\n{:?}", fname, result_fname, e)
+            Err(e) => {
+                eprintln!("Could not process file: {}->{}\n{}", fname.display(), result_fname.display(), e);
+                for e in e.iter().skip(1) {
+                    eprintln!("caused by: {}", e);
+                }
+            }
         }
     }
     Ok(())
@@ -242,7 +253,7 @@ mod tests {
     use dropfile::DropFile;
 
     #[test]
-    fn test_backup_func() -> Result<(), Box<dyn Error>> {
+    fn test_backup_func() -> Result<()> {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let orig_content = "This is a test of backup functionality. Some unicode: ąąąćććććęęę";
         write!(file, "{}", orig_content).unwrap();
@@ -257,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_template_empty_data() -> Result<(), Box<dyn Error>> {
+    fn test_template_empty_data() -> Result<()> {
         let mut template_file = tempfile::NamedTempFile::new()?;
         let orig_content = "content more original than half of youtube";
         write!(template_file, "{}", orig_content)?;
@@ -308,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_template() -> Result<(), Box<dyn Error>> {
+    fn test_template() -> Result<()> {
         let mut template_file = tempfile::NamedTempFile::new()?;
         let target_content = "content more original than half of youtube";
         let orig_content = "content more original than half of {{site}}";
@@ -333,9 +344,10 @@ mod tests {
     }
 
     #[test]
-    fn test_filename_to_dotfile() {
-        assert_eq!(filename_to_dotfile("/home/brych/dotfiles/zshrc").unwrap(), PathBuf::from("/home/brych/.zshrc"));
-        assert_eq!(filename_to_dotfile("/home/brych/dotfiles/config/nvim/init.vim").unwrap(), PathBuf::from("/home/brych/.config/nvim/init.vim"));
+    fn test_filename_to_dotfile() -> Result<()> {
+        assert_eq!(filename_to_dotfile("/home/brych/dotfiles/zshrc")?, PathBuf::from("/home/brych/.zshrc"));
+        assert_eq!(filename_to_dotfile("/home/brych/dotfiles/config/nvim/init.vim")?, PathBuf::from("/home/brych/.config/nvim/init.vim"));
+        Ok(())
     }
 
     #[test]

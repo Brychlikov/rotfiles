@@ -37,14 +37,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     match rfl {
         Rotfiles::Add{fname} => {
             println!("Adding file: {}", fname.to_str().unwrap());
-            if let Err(e) = rotfiles::add_file(fname) {
+            if let Err(ref e) = rotfiles::add_file(fname) {
                 eprintln!("Could not add file: {}", e);
+                for e in e.iter().skip(1) {
+                    eprintln!("caused by: {}", e);
+                }
+                std::process::exit(1);
             }
         }
         Rotfiles::Update => {
             println!("Updating configuration");
-            if let Err(e) = rotfiles::process_all_files() {
+            if let Err(ref e) = rotfiles::process_all_files() {
                 eprintln!("Error while updating configuration: {}", e);
+                for e in e.iter().skip(1) {
+                    eprintln!("caused by: {}", e);
+                }
+                std::process::exit(1);
             }
         }
     }
