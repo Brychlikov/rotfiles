@@ -16,7 +16,8 @@ use std::fs::File;
 use serde_json::Value as Json;
 use structopt::StructOpt;
 
-mod config;
+use rotfiles::errors::*;
+
 
 #[derive(StructOpt)]
 enum Rotfiles {
@@ -27,49 +28,42 @@ enum Rotfiles {
 }
 
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
+    match run() {
+        Err(ref e) => {
+            eprintln!("Error: {}", e);
+            for e in e.iter().skip(1) {
+                eprintln!("caused by: {}", e);
+            }
+            std::process::exit(1);
+        }
+        _ => ()
+    }
+}
+
+fn run() -> rotfiles::errors::Result<()> {
     pretty_env_logger::init();
     debug!("Program start");
-    error!("Program start");
 
+    let cfg = rotfiles::config::Config::from_file("/home/brych/.config/rotfiles/config.json")
+        .chain_err(|| "Could not load config.json")?;
+    let app = rotfiles::App::from_config(cfg)
+        .chain_err(|| "Could not instantiate App")?;
 
     let rfl = Rotfiles::from_args();
     match rfl {
         Rotfiles::Add{fname} => {
-            println!("Adding file: {}", fname.to_str().unwrap());
-            if let Err(ref e) = rotfiles::add_file(fname) {
-                eprintln!("Could not add file: {}", e);
-                for e in e.iter().skip(1) {
-                    eprintln!("caused by: {}", e);
-                }
-                std::process::exit(1);
-            }
+            println!("Adding file: {}", fname.to_string_lossy());
+            app.add_file(&fname)
+                .chain_err(|| format!("Could not add file {}", fname.display()))?;
         }
         Rotfiles::Update => {
             println!("Updating configuration");
-            if let Err(ref e) = rotfiles::process_all_files() {
-                eprintln!("Error while updating configuration: {}", e);
-                for e in e.iter().skip(1) {
-                    eprintln!("caused by: {}", e);
-                }
-                std::process::exit(1);
-            }
+            app.process_all_files()
+                .chain_err(|| "Error while updating configuration")?;
         }
     }
 
-    // let cfg = config::Config::from_file("config.json");
-    // println!("{:?}", cfg);
-
-    // for i in rotfiles::files_to_process() {
-    //     println!("{:?}", i);
-    // }
-    // rotfiles::process_all_files()?;
-
-    // println!("Hello, world!");
-    // rotfiles::process_file("/home/brych/dotfiles/test", "/home/brych/test")?;
-    // println!("Got past first one");
-    // rotfiles::add_file("/home/brych/.zshrc")?;
-    
     Ok(())
 }
 
