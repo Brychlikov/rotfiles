@@ -8,6 +8,7 @@ extern crate path_abs;
 extern crate error_chain;
 extern crate glob;
 extern crate chrono;
+extern crate pretty_env_logger;
 use handlebars::Handlebars;
 use std::path::{Path, PathBuf};
 
@@ -103,11 +104,9 @@ impl App {
         Ok(())
     }
 
-    fn ensure_template_newer_than_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let template_path = path.as_ref();
-        let dotfile_path = self.filename_to_dotfile(template_path)
-            .chain_err(|| "Can't translate filename to dotfile")?;
-
+    fn ensure_template_newer_than_file<P: AsRef<Path>, S: AsRef<Path>>(&self, tpath: P, dpath: S) -> Result<()> {
+        let template_path = tpath.as_ref();
+        let dotfile_path = dpath.as_ref();
         let template_metadata = template_path.metadata()
             .chain_err(|| "Can't access file's metadata")?;
         let dotfile_metadata = dotfile_path.metadata()
@@ -117,6 +116,9 @@ impl App {
             .chain_err(|| "Can't access modification time")?;
         let dotfile_mtime = dotfile_metadata.modified()
             .chain_err(|| "Can't access modification time")?;
+
+        debug!("Template modification time: {:?}", template_mtime);
+        debug!("Dotfile modification time: {:?}", dotfile_mtime);
         
         if dotfile_mtime > template_mtime {
             bail!(ErrorKind::FileNewerThanTemplate(template_path.to_string_lossy().into()));
@@ -128,7 +130,7 @@ impl App {
         where P: AsRef<Path>, U: AsRef<Path> {
         let mut handlebars = Handlebars::new();
 
-        self.ensure_template_newer_than_file(&template_path)
+        self.ensure_template_newer_than_file(&template_path, &result_path)
             .chain_err(|| "Error comparing modification times")?;
 
         let json_path: PathBuf = {
@@ -341,6 +343,7 @@ mod tests {
 
     #[test]
     fn test_backup() {
+        let _ = pretty_env_logger::try_init();
         pretty_err_catcher( || {
             let app = App::new_test()?;
             let mut file = tempfile::NamedTempFile::new()
@@ -362,6 +365,7 @@ mod tests {
 
     #[test]
     fn test_template_empty_data() {
+        let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
             let app = App::new_test()?;
             let mut template_file = tempfile::NamedTempFile::new()?;
@@ -388,6 +392,7 @@ mod tests {
 
     #[test]
     fn test_sanitize() {
+        let _ = pretty_env_logger::try_init();
         let s = "String to be left alone";
         let s2 = "String with daaangerous {{s and }}s";
         let s2_target = r#"String with daaangerous \{{s and \}}s"#;
@@ -415,6 +420,7 @@ mod tests {
 
     #[test]
     fn test_template() -> Result<()> {
+        let _ = pretty_env_logger::try_init();
         let app = App::new_test()?;
         let mut template_file = tempfile::NamedTempFile::new()?;
         let target_content = "content more original than half of youtube";
@@ -441,6 +447,7 @@ mod tests {
 
     #[test]
     fn test_filename_to_dotfile() {
+        let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
             let app = App::new_test()?;
             let home = &app.cfg.home_path;
@@ -461,6 +468,7 @@ mod tests {
 
     #[test]
     fn test_dotfile_to_filename() {
+        let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
             let app = App::new_test()
                 .chain_err(|| "Could instantiate app")?;
@@ -484,8 +492,9 @@ mod tests {
 
     #[test]
     fn test_dotfile_identity() {
+        let _ = pretty_env_logger::try_init();
         pretty_err_catcher( || {
-            let app = App::new_test().unwrap();
+            let app = App::new_test()?;
             let home = &app.cfg.home_path;
             for case in [home.join("dotfiles/zshrc"), home.join("dotfiles/config/nvim/init.vim")].iter() {
                 assert_eq!(
@@ -496,6 +505,37 @@ mod tests {
                         .chain_err(|| "Unable to translate dotfile to filename")?
                 );
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_ensure_template_newer_than_file() {
+        let _ = pretty_env_logger::try_init();
+        pretty_err_catcher(|| {
+            let app = App::new_test()?;
+
+            let dot_file = tempfile::NamedTempFile::new()
+                .chain_err(|| "Couldn't open temp file")?;
+
+            // sleep so that modification times differ by at lease one second
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            let template_file = tempfile::NamedTempFile::new()
+                .chain_err(|| "Couldn't open temp file")?;
+
+            let _res1 = app.ensure_template_newer_than_file(template_file.path(), dot_file.path())
+                .chain_err(|| format!("Template falsely marked as older"))?;
+            let _res2: std::result::Result<(), ()> 
+                = match app.ensure_template_newer_than_file(dot_file.path(), template_file.path()) 
+            {
+                Err(_) => Ok(()),
+                Ok(_) => bail!("Template falsely marked as correct (newer than file)")
+            };
+                
+
+
+
             Ok(())
         });
     }
