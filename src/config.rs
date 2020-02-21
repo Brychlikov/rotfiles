@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
@@ -17,11 +17,15 @@ impl Config {
     }
 
     pub fn new<P, R, S>(home_path: P, dot_path: R, backup_path: S) -> Self
-        where P: AsRef<Path>, R: AsRef<Path>, S: AsRef<Path> {
-            Self {
-                home_path: home_path.as_ref().to_owned(),
-                dot_path: dot_path.as_ref().to_owned(),
-                backup_path: backup_path.as_ref().to_owned(),
-            }
+    where
+        P: AsRef<Path>,
+        R: AsRef<Path>,
+        S: AsRef<Path>,
+    {
+        Self {
+            home_path: home_path.as_ref().to_owned(),
+            dot_path: dot_path.as_ref().to_owned(),
+            backup_path: backup_path.as_ref().to_owned(),
+        }
     }
 }

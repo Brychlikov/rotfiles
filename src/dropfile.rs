@@ -1,21 +1,24 @@
-use std::fs::{File};
-use std::path::{Path, PathBuf};
+use std::fs::File;
 use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 
 pub struct DropFile {
     path: PathBuf,
-    file: File
+    file: File,
 }
 
 impl DropFile {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<DropFile> {
         if path.as_ref().exists() {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{:?} already exists", path.as_ref())))
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{:?} already exists", path.as_ref()),
+            ));
         }
         let file = File::create(path.as_ref())?;
         Ok(DropFile {
             path: PathBuf::from(path.as_ref()),
-            file
+            file,
         })
     }
 }

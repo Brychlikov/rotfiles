@@ -8,25 +8,21 @@ extern crate structopt;
 extern crate log;
 extern crate pretty_env_logger;
 use handlebars::Handlebars;
-use std::path::{Path, PathBuf};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 
-use std::io::prelude::*;
-use std::fs::File;
 use serde_json::Value as Json;
+use std::fs::File;
+use std::io::prelude::*;
 use structopt::StructOpt;
 
 use rotfiles::errors::*;
 
-
 #[derive(StructOpt)]
 enum Rotfiles {
-    Add {
-        fname: PathBuf
-    },
-    Update
+    Add { fname: PathBuf },
+    Update,
 }
-
 
 fn main() {
     match run() {
@@ -37,7 +33,7 @@ fn main() {
             }
             std::process::exit(1);
         }
-        _ => ()
+        _ => (),
     }
 }
 
@@ -47,12 +43,11 @@ fn run() -> rotfiles::errors::Result<()> {
 
     let cfg = rotfiles::config::Config::from_file("/home/brych/.config/rotfiles/config.json")
         .chain_err(|| "Could not load config.json")?;
-    let app = rotfiles::App::from_config(cfg)
-        .chain_err(|| "Could not instantiate App")?;
+    let app = rotfiles::App::from_config(cfg).chain_err(|| "Could not instantiate App")?;
 
     let rfl = Rotfiles::from_args();
     match rfl {
-        Rotfiles::Add{fname} => {
+        Rotfiles::Add { fname } => {
             println!("Adding file: {}", fname.to_string_lossy());
             app.add_file(&fname, false)
                 .chain_err(|| format!("Could not add file {}", fname.display()))?;
@@ -66,4 +61,3 @@ fn run() -> rotfiles::errors::Result<()> {
 
     Ok(())
 }
-
