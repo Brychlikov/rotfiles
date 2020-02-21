@@ -9,12 +9,10 @@ pub struct DropFile {
 
 impl DropFile {
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<DropFile> {
-        dbg!(path.as_ref());
         if path.as_ref().exists() {
             return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{:?} already exists", path.as_ref())))
         }
         let file = File::create(path.as_ref())?;
-        println!("Got there");
         Ok(DropFile {
             path: PathBuf::from(path.as_ref()),
             file

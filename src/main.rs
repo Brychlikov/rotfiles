@@ -54,7 +54,7 @@ fn run() -> rotfiles::errors::Result<()> {
     match rfl {
         Rotfiles::Add{fname} => {
             println!("Adding file: {}", fname.to_string_lossy());
-            app.add_file(&fname)
+            app.add_file(&fname, false)
                 .chain_err(|| format!("Could not add file {}", fname.display()))?;
         }
         Rotfiles::Update => {

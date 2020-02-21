@@ -73,11 +73,18 @@ impl App {
         let backup_path = home_path.join(".local/share/rotfiles/backup");
 
         let res = Self {
-            cfg: config::Config::new(home_path, dot_path, backup_path),
+            cfg: config::Config::new(&home_path, &dot_path, &backup_path),
             _tempdir: Some(pseudo_home_dir),
         };
         res.ensure_workpath_exists()
             .chain_err(|| "Could not create workpaths")?;
+
+        // create global config file
+        let global_config_file_path = home_path.join(".config/rotfiles/dotconfig.json");
+        let mut glob_file = File::create(global_config_file_path)
+            .chain_err(|| "Could not create global config file")?;
+        write!(glob_file, "{}", json!({get_hostname(): true}).to_string())
+            .chain_err(|| "Could not write global config")?;
         Ok(res)
     }
 
@@ -100,6 +107,10 @@ impl App {
         let path2 = &self.cfg.dot_path;
         if !path2.exists() {
             std::fs::create_dir_all(path2)?;
+        }
+        let path3 = &self.cfg.home_path.join(".config/rotfiles");
+        if !path3.exists() {
+            std::fs::create_dir_all(path3)?;
         }
         Ok(())
     }
@@ -126,6 +137,42 @@ impl App {
         Ok(())
     }
 
+    fn get_template_config_data<P: AsRef<Path>>(&self, path: P) -> Result<Json> {
+        let global_config_file_path = self.cfg.home_path.join(".config/rotfiles/dotconfig.json");
+        debug!("Global config path is {}", global_config_file_path.display());
+        let global_config_file = File::open(global_config_file_path)
+            .chain_err(|| "Couldn't open global variables config file")?;
+        
+        // read global config
+        debug!("Reading global config");
+        let mut result = serde_json::from_reader(global_config_file)
+            .chain_err(|| "Couldn't parse json file")?;
+
+        let json_path: PathBuf = {
+            let mut ostring = path.as_ref().to_path_buf().into_os_string();
+            ostring.push(".json");
+            ostring.into()
+        };
+
+        if json_path.exists() {
+            debug!("Opening json file on path {:?}", json_path);
+            let local_config_file = File::open(json_path)
+                .chain_err(|| "Couldn't open local json file")?;
+            let local_data = serde_json::from_reader(local_config_file)
+                .chain_err(|| "Couldn't parse local json file")?;
+            match (&mut result, &local_data) {
+                (Json::Object(ref mut map1), Json::Object(ref map2)) => {
+                    map1.extend(map2.iter().map(|(k, v)| (k.clone(), v.clone())));
+                },
+                _ => bail!("Config files are not json objects")
+            }
+        }
+        else {
+            debug!("Local json file not found");
+        }
+        Ok(result)
+    }
+
     pub fn process_file<P, U>(&self, template_path: P, result_path: U) -> Result<()>
         where P: AsRef<Path>, U: AsRef<Path> {
         let mut handlebars = Handlebars::new();
@@ -133,15 +180,8 @@ impl App {
         self.ensure_template_newer_than_file(&template_path, &result_path)
             .chain_err(|| "Error comparing modification times")?;
 
-        let json_path: PathBuf = {
-            let mut ostring = template_path.as_ref().to_path_buf().into_os_string();
-            ostring.push(".json");
-            ostring.into()
-        };
-
-        debug!("Opening json file on path {:?}", json_path);
-        let json_string = read_file(json_path)?;
-        let data: Json = serde_json::from_str(&json_string).chain_err(|| ErrorKind::JsonConfigError("Could not read json config".to_string()))?;
+        let data = self.get_template_config_data(&template_path)
+            .chain_err(|| "Error reading template config")?;
 
         handlebars.register_template_file("file", &template_path)
             .chain_err(|| format!("Could not parse template file: {}", template_path.as_ref().display()))?;
@@ -263,7 +303,7 @@ impl App {
         Ok(())
     }
 
-    pub fn add_file<P: AsRef<Path>> (&self, path: P) -> Result<()> {
+    pub fn add_file<P: AsRef<Path>> (&self, path: P, generate_config: bool) -> Result<()> {
         debug!("Adding file {:?}", path.as_ref());
         let result_path = self.dotfile_to_filename(&path)
             .chain_err(|| format!("Could not convert {} to filename to store", path.as_ref().display()))?;
@@ -273,15 +313,17 @@ impl App {
             .chain_err(|| format!("Could not copy {} to {}", path.as_ref().display(), result_path.display()))?;
         sanitize_file(&result_path).chain_err(|| format!("Error sanitizing {}", result_path.display()))?;
 
-        let json_fname = {
-            let mut p = result_path.as_os_str().to_owned();
-            p.push(".json");
-            p
-        };
+        if generate_config {
+            let json_fname = {
+                let mut p = result_path.as_os_str().to_owned();
+                p.push(".json");
+                p
+            };
 
-        let json_value = json!({get_hostname(): true});
-        let mut json_file = File::create(json_fname).chain_err(|| "Could not create json file")?;
-        write!(json_file, "{}", json_value.to_string()).chain_err(|| "Could not write to json file")?;
+            let json_value = json!({get_hostname(): true});
+            let mut json_file = File::create(json_fname).chain_err(|| "Could not create json file")?;
+            write!(json_file, "{}", json_value.to_string()).chain_err(|| "Could not write to json file")?;
+        }
 
         Ok(())
     }
@@ -368,19 +410,20 @@ mod tests {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
             let app = App::new_test()?;
-            let mut template_file = tempfile::NamedTempFile::new()?;
+            let mut template_file = tempfile::NamedTempFile::new()
+                .chain_err(|| "Cant create temp file")?;
             let orig_content = "content more original than half of youtube";
             write!(template_file, "{}", orig_content)?;
 
             let mut json_name = template_file.path().as_os_str().to_owned();
-            println!("hello there");
             json_name.push(".json");
-            let mut json_file = DropFile::open(json_name).unwrap();
-            println!("hello there");
+            let mut json_file = DropFile::open(json_name)
+                .chain_err(|| "Can't create dropfile")?;
             write!(json_file, "{{}}")?;
 
             let result_file = tempfile::NamedTempFile::new().unwrap();
-            app.process_file(template_file.path(), result_file.path()).unwrap();
+            app.process_file(template_file.path(), result_file.path())
+                .chain_err(|| "Error processing file")?;
             let mut res2 = result_file.reopen().unwrap();
 
             let mut content = String::new();
@@ -419,30 +462,55 @@ mod tests {
     }
 
     #[test]
-    fn test_template() -> Result<()> {
-        let _ = pretty_env_logger::try_init();
-        let app = App::new_test()?;
-        let mut template_file = tempfile::NamedTempFile::new()?;
-        let target_content = "content more original than half of youtube";
-        let orig_content = "content more original than half of {{site}}";
-        write!(template_file, "{}", orig_content)?;
+    fn test_template() {
+        pretty_err_catcher(|| {
+            let _ = pretty_env_logger::try_init();
+            let app = App::new_test()?;
+            let mut template_file = tempfile::NamedTempFile::new()?;
+            let target_content = "content more original than half of youtube";
+            let orig_content = "content more original than half of {{site}}";
+            write!(template_file, "{}", orig_content)?;
 
-        let mut json_name = template_file.path().as_os_str().to_owned();
-        println!("hello there");
-        json_name.push(".json");
-        let mut json_file = DropFile::open(json_name).unwrap();
-        println!("hello there");
-        write!(json_file, r#"{{"site": "youtube"}}"#)?;
+            let mut json_name = template_file.path().as_os_str().to_owned();
+            json_name.push(".json");
+            let mut json_file = DropFile::open(json_name)
+                .chain_err(|| "Cant open temp json file")?;
+            write!(json_file, r#"{{"site": "youtube"}}"#)?;
 
-        let result_file = tempfile::NamedTempFile::new().unwrap();
-        app.process_file(template_file.path(), result_file.path()).unwrap();
-        let mut res2 = result_file.reopen().unwrap();
+            let result_file = tempfile::NamedTempFile::new()
+                .chain_err(|| "Can't open tempfile")?;
+            app.process_file(template_file.path(), result_file.path())
+                .chain_err(|| "Error processing file")?;
 
-        let mut content = String::new();
-        res2.read_to_string(&mut content).unwrap();
-        assert_eq!(target_content, content);
+            let content = read_file(result_file.path())
+                .chain_err(|| "Can't read result file")?;
+            assert_eq!(target_content, content);
 
-        Ok(())
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_template_no_local_json() {
+        pretty_err_catcher(|| {
+            let _ = pretty_env_logger::try_init();
+            let app = App::new_test()?;
+            let mut template_file = tempfile::NamedTempFile::new()?;
+            let target_content = "content more original than half of ";
+            let orig_content = "content more original than half of {{site}}"; // site is undefined in this test
+            write!(template_file, "{}", orig_content)?;
+
+            let result_file = tempfile::NamedTempFile::new()
+                .chain_err(|| "Can't open tempfile")?;
+            app.process_file(template_file.path(), result_file.path())
+                .chain_err(|| "Error processing file")?;
+
+            let content = read_file(result_file.path())
+                .chain_err(|| "Can't read result file")?;
+            assert_eq!(target_content, content);
+
+            Ok(())
+        });
     }
 
     #[test]
