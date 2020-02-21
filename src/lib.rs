@@ -79,12 +79,6 @@ impl App {
         res.ensure_workpath_exists()
             .chain_err(|| "Could not create workpaths")?;
 
-        // create global config file
-        let global_config_file_path = home_path.join(".config/rotfiles/dotconfig.json");
-        let mut glob_file = File::create(global_config_file_path)
-            .chain_err(|| "Could not create global config file")?;
-        write!(glob_file, "{}", json!({get_hostname(): true}).to_string())
-            .chain_err(|| "Could not write global config")?;
         Ok(res)
     }
 
@@ -99,7 +93,7 @@ impl App {
         Ok(res)
     }
 
-    fn ensure_workpath_exists(&self) -> std::io::Result<()> {
+    fn ensure_workpath_exists(&self) -> Result<()> {
         let path = &self.cfg.backup_path;
         if !path.exists() {
             std::fs::create_dir_all(path)?;
@@ -108,9 +102,14 @@ impl App {
         if !path2.exists() {
             std::fs::create_dir_all(path2)?;
         }
-        let path3 = &self.cfg.home_path.join(".config/rotfiles");
+        // ensure global config file exists
+        let path3 = &self.cfg.home_path.join(".config/rotfiles/dotconfig.json");
         if !path3.exists() {
-            std::fs::create_dir_all(path3)?;
+            ensure_parent_exists(&path3)?;
+            let mut glob_file = File::create(path3)
+                .chain_err(|| "Could not create global config file")?;
+            write!(glob_file, "{}", json!({get_hostname(): true}).to_string())
+                .chain_err(|| "Could not write global config")?;
         }
         Ok(())
     }
