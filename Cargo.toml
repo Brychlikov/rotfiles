@@ -3,6 +3,7 @@ name = "rotfiles"
 version = "0.1.0"
 authors = ["Brychlikow <brychlikow@gmail.com>"]
 edition = "2018"
+default-run = "rotfiles"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

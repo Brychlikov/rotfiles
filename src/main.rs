@@ -43,7 +43,7 @@ fn run() -> rotfiles::errors::Result<()> {
 
     let cfg = rotfiles::config::Config::from_file("/home/brych/.config/rotfiles/config.json")
         .chain_err(|| "Could not load config.json")?;
-    let app = rotfiles::App::from_config(cfg).chain_err(|| "Could not instantiate App")?;
+    let mut app = rotfiles::App::from_config(cfg).chain_err(|| "Could not instantiate App")?;
 
     let rfl = Rotfiles::from_args();
     match rfl {

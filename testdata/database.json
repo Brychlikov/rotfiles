@@ -1,0 +1,20 @@
+{
+  "/home/brych/dotfiles/config/innertest": {
+    "template_path": "/home/brych/dotfiles/config/innertest",
+    "config_path": null,
+    "destination": "/home/brych/.config/innertest",
+    "last_updated": {
+      "secs_since_epoch": 1582302525,
+      "nanos_since_epoch": 431299053
+    }
+  },
+  "/home/brych/dotfiles/testfile": {
+    "template_path": "/home/brych/dotfiles/testfile",
+    "config_path": null,
+    "destination": "/home/brych/.testfile",
+    "last_updated": {
+      "secs_since_epoch": 1582302524,
+      "nanos_since_epoch": 431177088
+    }
+  }
+}

@@ -17,11 +17,15 @@ use serde_json::Value as Json;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::prelude::*;
+use std::time::SystemTime;
 
 use path_abs::PathAbs;
 
 pub mod config;
+pub mod database;
 mod dropfile;
+
+use self::database::{Database, Entry};
 
 pub mod errors {
     error_chain! {
@@ -54,8 +58,9 @@ pub mod errors {
 use errors::*;
 
 pub struct App {
-    cfg: config::Config,
+    pub cfg: config::Config,
 
+    db: Database,
     #[cfg(test)]
     // ensure directory is dropped and cleaned after exit
     _tempdir: Option<tempfile::TempDir>,
@@ -70,10 +75,28 @@ impl App {
         let dot_path = home_path.join("dotfiles");
         let backup_path = home_path.join(".local/share/rotfiles/backup");
 
-        let res = Self {
-            cfg: config::Config::new(&home_path, &dot_path, &backup_path),
-            _tempdir: Some(pseudo_home_dir),
-        };
+        let cfg = config::Config::new(&home_path, &dot_path, &backup_path);
+        let res;
+
+        if let Ok(_) = std::env::var("ROTFILES_TEST_NO_CLEANUP") {
+            debug!("Temp dir will not be deleted");
+            std::mem::forget(pseudo_home_dir);
+            res = Self {
+                cfg: cfg.clone(),
+                db: Database::connect(&cfg).chain_err(|| "Could not connect to database")?,
+                _tempdir: None,
+            };
+        }
+        else {
+            res = Self {
+                cfg: cfg.clone(),
+                db: Database::connect(&cfg).chain_err(|| "Could not connect to database")?,
+                _tempdir: Some(pseudo_home_dir),
+            };
+
+        }
+
+
         res.ensure_workpath_exists()
             .chain_err(|| "Could not create workpaths")?;
 
@@ -82,7 +105,8 @@ impl App {
 
     pub fn from_config(cfg: config::Config) -> Result<Self> {
         let res = Self {
-            cfg,
+            cfg: cfg.clone(),
+            db: Database::connect(&cfg).chain_err(|| "Could not connect to database")?,
             #[cfg(test)]
             _tempdir: None,
         };
@@ -112,33 +136,26 @@ impl App {
         Ok(())
     }
 
-    fn ensure_template_newer_than_file<P: AsRef<Path>, S: AsRef<Path>>(
+    fn ensure_template_newer_than_file<P: AsRef<Path>>(
         &self,
-        tpath: P,
-        dpath: S,
+        dpath: P,
     ) -> Result<()> {
-        let template_path = tpath.as_ref();
         let dotfile_path = dpath.as_ref();
-        let template_metadata = template_path
+        let file_metadata = dotfile_path
             .metadata()
             .chain_err(|| "Can't access file's metadata")?;
-        let dotfile_metadata = dotfile_path
-            .metadata()
-            .chain_err(|| "Can't access file's metadata")?;
-
-        let template_mtime = template_metadata
-            .modified()
-            .chain_err(|| "Can't access modification time")?;
-        let dotfile_mtime = dotfile_metadata
+        let file_mtime = file_metadata
             .modified()
             .chain_err(|| "Can't access modification time")?;
 
-        debug!("Template modification time: {:?}", template_mtime);
-        debug!("Dotfile modification time: {:?}", dotfile_mtime);
+        let database_mtime = self.db.last_updated(&dotfile_path.to_owned())
+            .chain_err(|| "Path not in database")?;
+        debug!("Database modification time: {:?}", database_mtime);
+        debug!("Dotfile modification time: {:?}", file_mtime);
 
-        if dotfile_mtime > template_mtime {
+        if file_mtime > database_mtime {
             bail!(ErrorKind::FileNewerThanTemplate(
-                template_path.to_string_lossy().into()
+                dotfile_path.to_string_lossy().into()
             ));
         }
         Ok(())
@@ -182,14 +199,14 @@ impl App {
         Ok(result)
     }
 
-    pub fn process_file<P, U>(&self, template_path: P, result_path: U) -> Result<()>
+    pub fn process_file<P, U>(&mut self, template_path: P, result_path: U) -> Result<()>
     where
         P: AsRef<Path>,
         U: AsRef<Path>,
     {
         let mut handlebars = Handlebars::new();
 
-        self.ensure_template_newer_than_file(&template_path, &result_path)
+        self.ensure_template_newer_than_file(&result_path)
             .chain_err(|| "Error comparing modification times")?;
 
         let data = self
@@ -209,7 +226,7 @@ impl App {
             self.backup_file(&result_path)?;
         }
 
-        let mut file = File::create(result_path)?;
+        let mut file = File::create(&result_path)?;
         debug!("Writing template");
         write!(
             file,
@@ -218,6 +235,9 @@ impl App {
                 .render("file", &data)
                 .chain_err(|| "Could not render template")?
         )?;
+
+        self.db.touch(&result_path.as_ref().to_owned())
+            .chain_err(|| "Error updating file modtime")?;
 
         Ok(())
     }
@@ -330,7 +350,7 @@ impl App {
         Ok(result_path)
     }
 
-    pub fn process_all_files(&self) -> Result<()> {
+    pub fn process_all_files(&mut self) -> Result<()> {
         for fname in self.files_to_process() {
             debug!("File processing loop entry on {:?}", fname);
             let result_fname = self.filename_to_dotfile(&fname)?;
@@ -353,7 +373,7 @@ impl App {
         Ok(())
     }
 
-    pub fn add_file<P: AsRef<Path>>(&self, path: P, generate_config: bool) -> Result<()> {
+    pub fn add_file<P: AsRef<Path>>(&mut self, path: P, generate_config: bool) -> Result<()> {
         debug!("Adding file {:?}", path.as_ref());
         let result_path = self.dotfile_to_filename(&path).chain_err(|| {
             format!(
@@ -378,12 +398,25 @@ impl App {
         sanitize_file(&result_path)
             .chain_err(|| format!("Error sanitizing {}", result_path.display()))?;
 
+        let modtime = path.as_ref()
+            .metadata().chain_err(|| "Can't access file's metadata")?
+            .modified().chain_err(|| "Can't access file's modification time")?;
+
+
+        let mut entry = Entry {
+            template_path: result_path.clone(),
+            config_path: None,
+            destination: path.as_ref().to_owned(),
+            last_updated: modtime,
+        };
+
         if generate_config {
             let json_fname = {
                 let mut p = result_path.as_os_str().to_owned();
                 p.push(".json");
                 p
             };
+            entry.config_path = Some(PathBuf::from(&json_fname));
 
             let json_value = json!({get_hostname(): true});
             let mut json_file =
@@ -391,6 +424,8 @@ impl App {
             write!(json_file, "{}", json_value.to_string())
                 .chain_err(|| "Could not write to json file")?;
         }
+
+        self.db.add_entry(entry);
 
         Ok(())
     }
@@ -415,6 +450,7 @@ fn ensure_parent_exists<P: AsRef<Path>>(path: P) -> Result<()> {
 }
 
 fn sanitize_file<P: AsRef<Path>>(path: P) -> Result<()> {
+    debug!("Sanitizing file {}", path.as_ref().display());
     let contents = read_file(&path)?
         .replace("{{", "\\{{")
         .replace("}}", "\\}}");
@@ -425,6 +461,7 @@ fn sanitize_file<P: AsRef<Path>>(path: P) -> Result<()> {
         )
     })?;
     write!(file, "{}", contents)?;
+    debug!("File {} sanitized with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
     Ok(())
 }
 
@@ -433,6 +470,16 @@ fn get_hostname() -> String {
     let mut f = File::open("/etc/hostname").unwrap();
     f.read_to_string(&mut result).unwrap();
     String::from(result.trim_end())
+}
+
+fn create_file_with_contents<P: AsRef<Path>>(path: P, contents: &str) -> Result<()> {
+    ensure_parent_exists(&path)?;
+    {
+        let mut file = File::create(&path)?;
+        write!(file, "{}", contents)?;
+    }
+    debug!("File {} created with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -446,10 +493,11 @@ mod tests {
         match func() {
             Ok(_) => (),
             Err(ref e) => {
-                println!("Error encountered: {}", e);
+                println!("\nError encountered: {}", e);
                 for e in e.iter().skip(1) {
                     println!("caused by: {}", e);
                 }
+                println!();
                 panic!("Execution failed");
             }
         }
@@ -459,7 +507,7 @@ mod tests {
     fn test_backup() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test()?;
+            let mut app = App::new_test()?;
             let mut file = tempfile::NamedTempFile::new().chain_err(|| "Can't create temp file")?;
             let orig_content = "This is a test of backup functionality. Some unicode: ąąąćććććęęę";
             write!(file, "{}", orig_content).chain_err(|| "Can't write to temp file")?;
@@ -478,7 +526,7 @@ mod tests {
     fn test_template_empty_data() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test()?;
+            let mut app = App::new_test()?;
             let mut template_file =
                 tempfile::NamedTempFile::new().chain_err(|| "Cant create temp file")?;
             let orig_content = "content more original than half of youtube";
@@ -530,26 +578,31 @@ mod tests {
     }
 
     #[test]
-    fn test_template() {
+    fn test_template_full() {
         pretty_err_catcher(|| {
             let _ = pretty_env_logger::try_init();
-            let app = App::new_test()?;
-            let mut template_file = tempfile::NamedTempFile::new()?;
+            let mut app = App::new_test()?;
+
+            let result_path = app.cfg.home_path.join(".testtemplate");
+            let template_path = app.dotfile_to_filename(&result_path)?;
+            let mut json_name = template_path.as_os_str().to_owned();
+            json_name.push(".json");
+
             let target_content = "content more original than half of youtube";
             let orig_content = "content more original than half of {{site}}";
-            write!(template_file, "{}", orig_content)?;
 
-            let mut json_name = template_file.path().as_os_str().to_owned();
-            json_name.push(".json");
-            let mut json_file =
-                DropFile::open(json_name).chain_err(|| "Cant open temp json file")?;
-            write!(json_file, r#"{{"site": "youtube"}}"#)?;
+            create_file_with_contents(&result_path, target_content)?;
 
-            let result_file = tempfile::NamedTempFile::new().chain_err(|| "Can't open tempfile")?;
-            app.process_file(template_file.path(), result_file.path())
+            app.add_file(&result_path, true)
+                .chain_err(|| "Error adding file")?;
+
+            create_file_with_contents(&template_path, orig_content)?;
+            create_file_with_contents(&json_name, r#"{"site": "youtube"}"#)?;
+
+            app.process_file(&template_path, &result_path)
                 .chain_err(|| "Error processing file")?;
 
-            let content = read_file(result_file.path()).chain_err(|| "Can't read result file")?;
+            let content = read_file(&result_path).chain_err(|| "Can't read result file")?;
             assert_eq!(target_content, content);
 
             Ok(())
@@ -560,17 +613,24 @@ mod tests {
     fn test_template_no_local_json() {
         pretty_err_catcher(|| {
             let _ = pretty_env_logger::try_init();
-            let app = App::new_test()?;
-            let mut template_file = tempfile::NamedTempFile::new()?;
+            let mut app = App::new_test()?;
+            let result_path = app.cfg.home_path.join(".testdotfile");
+            let template_path = app.dotfile_to_filename(&result_path)?;
+
             let target_content = "content more original than half of ";
             let orig_content = "content more original than half of {{site}}"; // site is undefined in this test
-            write!(template_file, "{}", orig_content)?;
 
-            let result_file = tempfile::NamedTempFile::new().chain_err(|| "Can't open tempfile")?;
-            app.process_file(template_file.path(), result_file.path())
+            create_file_with_contents(&result_path, target_content)?;
+
+            app.add_file(&result_path, false)
+                .chain_err(|| "Error adding file")?;
+
+            create_file_with_contents(&template_path, orig_content)?;
+
+            app.process_file(&template_path, &result_path)
                 .chain_err(|| "Error processing file")?;
 
-            let content = read_file(result_file.path()).chain_err(|| "Can't read result file")?;
+            let content = read_file(result_path).chain_err(|| "Can't read result file")?;
             assert_eq!(target_content, content);
 
             Ok(())
@@ -581,7 +641,7 @@ mod tests {
     fn test_filename_to_dotfile() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test()?;
+            let mut app = App::new_test()?;
             let home = &app.cfg.home_path;
             let cases = vec![
                 (home.join("dotfiles/zshrc"), home.join(".zshrc")),
@@ -606,7 +666,7 @@ mod tests {
     fn test_dotfile_to_filename() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test().chain_err(|| "Could instantiate app")?;
+            let mut app = App::new_test().chain_err(|| "Could instantiate app")?;
             let home = &app.cfg.home_path;
 
             let cases = vec![
@@ -633,7 +693,7 @@ mod tests {
     fn test_dotfile_identity() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test()?;
+            let mut app = App::new_test()?;
             let home = &app.cfg.home_path;
             for case in [
                 home.join("dotfiles/zshrc"),
@@ -658,25 +718,93 @@ mod tests {
     fn test_ensure_template_newer_than_file() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let app = App::new_test()?;
+            let mut app = App::new_test()?;
 
-            let dot_file =
-                tempfile::NamedTempFile::new().chain_err(|| "Couldn't open temp file")?;
+            let dot_file_path = app.cfg.home_path.join(".rotfiletestdotfile");
 
-            // sleep so that modification times differ by at lease one second
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            create_file_with_contents(&dot_file_path, "Simple test dotfile")
+                .chain_err(|| "Could not create mock dotfile")?;
 
-            let template_file =
-                tempfile::NamedTempFile::new().chain_err(|| "Couldn't open temp file")?;
+            // sleep so that modification times differ somewhat
+            // probably not necessary
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            debug!("Dotfile modtime before adding: {:?}", dot_file_path.metadata()?.modified()?);
+            debug!("Dotfile modtime before adding: {:?}", dot_file_path.metadata()?.modified()?);
+            app.add_file(&dot_file_path, false)
+                .chain_err(|| "Error adding file")?;
+            debug!("Dotfile modtime after adding: {:?}", dot_file_path.metadata()?.modified()?);
 
             let _res1 = app
-                .ensure_template_newer_than_file(template_file.path(), dot_file.path())
+                .ensure_template_newer_than_file(
+                    &dot_file_path,
+                )
                 .chain_err(|| format!("Template falsely marked as older"))?;
-            let _res2: std::result::Result<(), ()> =
-                match app.ensure_template_newer_than_file(dot_file.path(), template_file.path()) {
-                    Err(_) => Ok(()),
-                    Ok(_) => bail!("Template falsely marked as correct (newer than file)"),
-                };
+            // let _res2: std::result::Result<(), ()> = match app.ensure_template_newer_than_file(
+            //     &dot_file_path,
+            // ) {
+            //     Err(_) => Ok(()),
+            //     Ok(_) => bail!("Template falsely marked as correct (newer than file)"),
+            // };
+
+            app.process_file(app.dotfile_to_filename(&dot_file_path)?, &dot_file_path)
+                .chain_err(|| "Error processing file")?;
+
+            let _res3 = app
+                .ensure_template_newer_than_file(
+                    &dot_file_path,
+                )
+                .chain_err(|| format!("Template falsely marked as older after processing"))?;
+            // let _res4: std::result::Result<(), ()> = match app.ensure_template_newer_than_file(
+            //     &dot_file_path,
+            // ) {
+            //     Err(_) => Ok(()),
+            //     Ok(_) => bail!("Template falsely marked as correct (newer than file) after processing"),
+            // };
+
+
+            Ok(())
+        });
+    }
+
+    fn assert_acceptable_difference(mut s1: std::time::SystemTime, mut s2: std::time::SystemTime) {
+        if s2 < s1 {
+            std::mem::swap(&mut s1, &mut s2)
+        }
+        let diff = s2.duration_since(s1).expect("TIME IS DEAD");
+        if diff > std::time::Duration::from_millis(50) {
+            panic!(
+                "Time difference between {:?} and {:?} is unacceptable",
+                s1, s2
+            );
+        }
+    }
+
+    #[test]
+    fn test_add_file_no_config() {
+        let _ = pretty_env_logger::try_init();
+        pretty_err_catcher(|| {
+            let mut app = App::new_test()?;
+
+            let dotfile_path = app.cfg.home_path.join(".zshrc");
+            let contents = r#"This is a test file"#;
+            create_file_with_contents(&dotfile_path, contents)?;
+
+            let timestamp = std::time::SystemTime::now();
+            app.add_file(&dotfile_path, false)
+                .chain_err(|| "Error adding file")?;
+
+            assert_acceptable_difference(
+                app.db
+                    .last_updated(&dotfile_path)
+                    .chain_err(|| "Requested path not in database")?,
+                timestamp,
+            );
+
+            assert_eq!(
+                contents,
+                read_file(app.dotfile_to_filename(&dotfile_path)?)?
+            );
 
             Ok(())
         });
