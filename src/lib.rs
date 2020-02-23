@@ -206,8 +206,18 @@ impl App {
     {
         let mut handlebars = Handlebars::new();
 
-        self.ensure_template_newer_than_file(&result_path)
-            .chain_err(|| "Error comparing modification times")?;
+        if result_path.as_ref().exists() {
+            self.ensure_template_newer_than_file(&result_path)
+                .chain_err(|| "Error comparing modification times")?;
+        }
+        else {
+            self.db.add_entry(Entry {
+                template_path: template_path.as_ref().to_path_buf(),
+                config_path: None,
+                destination: result_path.as_ref().to_path_buf(),
+                last_updated: SystemTime::now(),
+            });
+        }
 
         let data = self
             .get_template_config_data(&template_path)
@@ -223,10 +233,14 @@ impl App {
             })?;
 
         if result_path.as_ref().exists() {
-            self.backup_file(&result_path)?;
+            self.backup_file(&result_path)
+                .chain_err(|| "Error backing file up")?;
         }
 
-        let mut file = File::create(&result_path)?;
+        ensure_parent_exists(&result_path)
+            .chain_err(|| "Could not create parent directories")?;
+        let mut file = File::create(&result_path)
+            .chain_err(|| "Could not create result file")?;
         debug!("Writing template");
         write!(
             file,
@@ -234,7 +248,7 @@ impl App {
             handlebars
                 .render("file", &data)
                 .chain_err(|| "Could not render template")?
-        )?;
+        ).chain_err(|| "Error writing result file")?;
 
         self.db.touch(&result_path.as_ref().to_owned())
             .chain_err(|| "Error updating file modtime")?;
@@ -285,13 +299,41 @@ impl App {
 
     pub fn files_to_process(&self) -> impl Iterator<Item = PathBuf> {
         let glob_path = self.cfg.dot_path.to_string_lossy() + "/**/*";
-        glob::glob(&glob_path)
+        let match_options = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: false,
+            require_literal_leading_dot: true,
+        };
+
+        let dot_path = self.cfg.dot_path.clone();
+
+        glob::glob_with(&glob_path, match_options)
             .expect("Incorrect path")
             .filter_map(std::result::Result::ok) // filter out non-readable files
             // filter out json files
             .filter(|p| {
                 p.is_file() && !(p.extension().is_some() && p.extension().unwrap() == "json")
             })
+            .filter(move |p| {
+                let relative = p.strip_prefix(dot_path.clone()).unwrap();
+                // debug!("Relative path: {}", relative.display());
+                // debug!("First char: {:?}", relative.to_string_lossy().chars().nth(0));
+                match relative.to_string_lossy().chars().nth(0) {
+                    Some('.') => false,
+                    None => false,
+                    _ => true
+                }
+            })
+            // .filter(|p| {
+            //     p
+            //         .ancestors()
+            //         .inspect(|a| trace!("Next path ancestor: {}", a.display()))
+            //         .filter_map(|a| a.file_name())
+            //         .inspect(|f| trace!("Last component: {:?}", f))
+            //         .map(|f| f.to_string_lossy().chars().nth(0))
+            //         .inspect(|c| trace!("First char: {:?}\n", c))
+            //         .all(|c| c != Some('.'))  // remove all hidden files
+            // })
     }
 
     fn filename_to_dotfile<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
@@ -353,6 +395,7 @@ impl App {
     pub fn process_all_files(&mut self) -> Result<()> {
         for fname in self.files_to_process() {
             debug!("File processing loop entry on {:?}", fname);
+            println!("Processing {}", fname.display());
             let result_fname = self.filename_to_dotfile(&fname)?;
             let res = self.process_file(&fname, &result_fname);
             match res {
@@ -366,6 +409,9 @@ impl App {
                     );
                     for e in e.iter().skip(1) {
                         eprintln!("caused by: {}", e);
+                    }
+                    if let Ok(_) = std::env::var("RUST_BACKTRACE") {
+                        eprintln!("Backtrace:\n{:?}", e.backtrace())
                     }
                 }
             }
