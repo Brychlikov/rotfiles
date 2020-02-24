@@ -19,6 +19,7 @@ pretty_env_logger = "0.4.0"
 log = "0.4.8"
 error-chain = "0.12.1"
 path_abs = "0.5.0"
+subprocess = "0.2.4"
 
 [dev-dependencies]
 assert_cmd = "0.12.0"

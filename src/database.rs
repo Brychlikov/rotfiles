@@ -10,6 +10,9 @@ use std::time::SystemTime;
 use std::collections::{HashMap};
 
 use std::fs::File;
+use std::borrow::Borrow;
+use std::hash::Hash;
+use std::cmp::Eq;
 
 // For now the "Database" is gonna just be a json file
 
@@ -83,6 +86,13 @@ impl Database {
             res += &format!("{} -> {:?}\n", k.display(), v.last_updated);
         }
         trace!("Database contents:\n{}", res);
+    }
+
+    pub fn in_database<P>(&self, path: &P) -> bool
+        where PathBuf: Borrow<P>,
+              P: Hash + Eq
+    {
+        self.data.contains_key(path)
     }
 
     pub fn add_entry(&mut self, e: Entry) -> Option<Entry> {

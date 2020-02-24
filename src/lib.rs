@@ -8,6 +8,7 @@ extern crate path_abs;
 extern crate error_chain;
 extern crate chrono;
 extern crate glob;
+extern crate subprocess;
 extern crate pretty_env_logger;
 use handlebars::Handlebars;
 use std::path::{Path, PathBuf};
@@ -474,6 +475,46 @@ impl App {
 
         Ok(())
     }
+
+    pub fn edit_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let path = PathAbs::new(&path)
+            .chain_err(|| format!("Could not convert {} to absolute path", path.as_ref().display()))?
+            .as_path()
+            .to_owned();
+        debug!("Database check of {}", path.display());
+        if ! self.db.in_database(&path.to_owned()) {
+            let res = yes_no_prompt(&format!("File {} does not appear to be managed by rotfiles. Do you want to add it?", path.display()))?;
+            if res {
+                self.add_file(&path, false)
+                    .chain_err(|| "Error adding file")?;
+            }
+            else {
+                bail!("File not managed by rotfiles");
+            }
+        }
+
+        let template_path = self.dotfile_to_filename(&path)
+            .chain_err(|| "Could not convert to template filename")?;
+        let editor = std::env::var("EDITOR")
+            .chain_err(|| "Could not get $EDITOR env variable")?;
+
+        match subprocess::Exec::cmd(editor)
+            .args(&[template_path.as_os_str()])
+            .join()
+            .chain_err(|| "Failed to edit")?
+        {
+            subprocess::ExitStatus::Exited(0) => (),
+            _ => bail!("Editor probably failed")
+        }
+
+        println!("Applying template");
+        self.process_file(&template_path, &path)
+            .chain_err(|| "Error processing file after edit")?;
+
+        Ok(())
+    }
+
+    
 }
 
 fn read_file<P: AsRef<Path>>(path: P) -> Result<String> {
@@ -515,6 +556,31 @@ fn get_hostname() -> String {
     let mut f = File::open("/etc/hostname").unwrap();
     f.read_to_string(&mut result).unwrap();
     String::from(result.trim_end())
+}
+
+fn yes_no_prompt(prompt: &str) -> Result<bool> {
+    println!("{} [Yn]", prompt);
+    loop {
+        let mut line = String::new();
+        let bytes_read = std::io::stdin().read_line(&mut line)
+            .chain_err(|| "Could not read answer from stdin")?;
+        debug!("Read {} lines of answer", bytes_read);
+
+        if bytes_read == 2 {// [yn] + newline  Gotta hope there is no windows users
+                let res =  line.chars().nth(0).unwrap().to_lowercase().nth(0).unwrap();
+                if res == 'y' {
+                    return Ok(true)
+                }
+                else if res == 'n' {
+                    return Ok(false)
+                }
+        }
+        if bytes_read == 1 {  // again, newline only
+            return Ok(true)
+        }
+
+        println!("{} is not a correct answer", &line);
+    }
 }
 
 #[cfg(test)]
