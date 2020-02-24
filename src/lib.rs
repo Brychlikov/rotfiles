@@ -23,7 +23,6 @@ use path_abs::PathAbs;
 
 pub mod config;
 pub mod database;
-mod dropfile;
 
 use self::database::{Database, Entry};
 
@@ -518,22 +517,21 @@ fn get_hostname() -> String {
     String::from(result.trim_end())
 }
 
-fn create_file_with_contents<P: AsRef<Path>>(path: P, contents: &str) -> Result<()> {
-    ensure_parent_exists(&path)?;
-    {
-        let mut file = File::create(&path)?;
-        write!(file, "{}", contents)?;
-    }
-    debug!("File {} created with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     extern crate tempfile;
 
-    use dropfile::DropFile;
+    fn create_file_with_contents<P: AsRef<Path>>(path: P, contents: &str) -> Result<()> {
+        ensure_parent_exists(&path)?;
+        {
+            let mut file = File::create(&path)?;
+            write!(file, "{}", contents)?;
+        }
+        debug!("File {} created with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
+        Ok(())
+    }
+
 
     fn pretty_err_catcher<F: FnOnce() -> Result<()>>(func: F) {
         match func() {
@@ -553,7 +551,7 @@ mod tests {
     fn test_backup() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let mut app = App::new_test()?;
+            let app = App::new_test()?;
             let mut file = tempfile::NamedTempFile::new().chain_err(|| "Can't create temp file")?;
             let orig_content = "This is a test of backup functionality. Some unicode: ąąąćććććęęę";
             write!(file, "{}", orig_content).chain_err(|| "Can't write to temp file")?;
@@ -573,23 +571,21 @@ mod tests {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
             let mut app = App::new_test()?;
-            let mut template_file =
-                tempfile::NamedTempFile::new().chain_err(|| "Cant create temp file")?;
+
+            let result_path = app.cfg.home_path.join(".empty_data_test");
+            let template_path = app.dotfile_to_filename(&result_path)?;
+
             let orig_content = "content more original than half of youtube";
-            write!(template_file, "{}", orig_content)?;
+            create_file_with_contents(&template_path, orig_content)?;
 
-            let mut json_name = template_file.path().as_os_str().to_owned();
+            let mut json_name = template_path.as_os_str().to_owned();
             json_name.push(".json");
-            let mut json_file = DropFile::open(json_name).chain_err(|| "Can't create dropfile")?;
-            write!(json_file, "{{}}")?;
+            create_file_with_contents(json_name, "{}")?;
 
-            let result_file = tempfile::NamedTempFile::new().unwrap();
-            app.process_file(template_file.path(), result_file.path())
+            app.process_file(&template_path, &result_path)
                 .chain_err(|| "Error processing file")?;
-            let mut res2 = result_file.reopen().unwrap();
 
-            let mut content = String::new();
-            res2.read_to_string(&mut content).unwrap();
+            let content = read_file(result_path)?;
             assert_eq!(orig_content, content);
             Ok(())
         });
@@ -687,7 +683,7 @@ mod tests {
     fn test_filename_to_dotfile() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let mut app = App::new_test()?;
+            let app = App::new_test()?;
             let home = &app.cfg.home_path;
             let cases = vec![
                 (home.join("dotfiles/zshrc"), home.join(".zshrc")),
@@ -712,7 +708,7 @@ mod tests {
     fn test_dotfile_to_filename() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let mut app = App::new_test().chain_err(|| "Could instantiate app")?;
+            let app = App::new_test().chain_err(|| "Could instantiate app")?;
             let home = &app.cfg.home_path;
 
             let cases = vec![
@@ -739,7 +735,7 @@ mod tests {
     fn test_dotfile_identity() {
         let _ = pretty_env_logger::try_init();
         pretty_err_catcher(|| {
-            let mut app = App::new_test()?;
+            let app = App::new_test()?;
             let home = &app.cfg.home_path;
             for case in [
                 home.join("dotfiles/zshrc"),

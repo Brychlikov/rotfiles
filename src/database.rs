@@ -7,7 +7,7 @@ use serde::{Serialize, Deserialize};
 use std::io::prelude::*;
 use crate::errors::*;
 use std::time::SystemTime;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap};
 
 use std::fs::File;
 
@@ -31,7 +31,7 @@ impl Database {
     pub fn connect(cfg: &crate::config::Config) -> Result<Self> {
         let fname = cfg.backup_path.join("database.json");
         Database::ensure_exists(cfg)?;
-        let mut file = File::open(&fname)
+        let file = File::open(&fname)
             .chain_err(|| "Couldn't open database file")?;
         let data = serde_json::from_reader(file)
             .chain_err(|| "Error decoding")?;

@@ -13,7 +13,7 @@ fn run() -> Result<()> {
     db.add_entry(entry);
     std::thread::sleep(std::time::Duration::from_secs(1));
     db.add_entry(make_test_entry(&cfg, "config/innertest"));
-    db.commit();
+    db.commit()?;
     Ok(())
 }
 
