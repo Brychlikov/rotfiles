@@ -210,13 +210,19 @@ impl App {
     {
         let mut handlebars = Handlebars::new();
 
-        let add_entry = !result_path.as_ref().exists() && match self.ensure_template_newer_than_file(&result_path) {
-            Ok(_) => false,
-            Err(Error(ErrorKind::NotInDatabaseError, _)) => true,
+        debug!("Database check on file {}", result_path.as_ref().display());
+        let add_entry = !result_path.as_ref().exists() || match self.ensure_template_newer_than_file(&result_path) {
+            Ok(_) => {
+                debug!("No error on check");
+                false
+            },
+            Err(Error(ErrorKind::NotInDatabaseError, _)) => {
+                debug!("Not in database");
+                true
+            },
             Err(_) => bail!("Error comparing modification times"),
         };
         
-        debug!("Database check on file {}", result_path.as_ref().display());
         if add_entry {
             debug!("File {} not in database. Adding", result_path.as_ref().display());
             self.db.add_entry(Entry {
