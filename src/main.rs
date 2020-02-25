@@ -4,7 +4,7 @@ extern crate structopt;
 #[macro_use]
 extern crate log;
 extern crate pretty_env_logger;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 
 use structopt::StructOpt;
 
@@ -14,6 +14,7 @@ use rotfiles::errors::*;
 enum Rotfiles {
     Add { fname: PathBuf },
     Update,
+    Edit { fname: PathBuf },
 }
 
 fn main() {
@@ -48,6 +49,10 @@ fn run() -> rotfiles::errors::Result<()> {
             println!("Updating configuration");
             app.process_all_files()
                 .chain_err(|| "Error while updating configuration")?;
+        }
+        Rotfiles::Edit { fname } => {
+            println!("Editing file: {}", fname.display());
+            app.edit_file(&fname)?;
         }
     }
 

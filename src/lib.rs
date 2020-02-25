@@ -9,6 +9,7 @@ extern crate error_chain;
 extern crate chrono;
 extern crate glob;
 extern crate pretty_env_logger;
+extern crate subprocess;
 use handlebars::Handlebars;
 use std::path::{Path, PathBuf};
 
@@ -89,16 +90,13 @@ impl App {
                 db: Database::connect(&cfg).chain_err(|| "Could not connect to database")?,
                 _tempdir: None,
             };
-        }
-        else {
+        } else {
             res = Self {
                 cfg: cfg.clone(),
                 db: Database::connect(&cfg).chain_err(|| "Could not connect to database")?,
                 _tempdir: Some(pseudo_home_dir),
             };
-
         }
-
 
         res.ensure_workpath_exists()
             .chain_err(|| "Could not create workpaths")?;
@@ -139,10 +137,7 @@ impl App {
         Ok(())
     }
 
-    fn ensure_template_newer_than_file<P: AsRef<Path>>(
-        &self,
-        dpath: P,
-    ) -> Result<()> {
+    fn ensure_template_newer_than_file<P: AsRef<Path>>(&self, dpath: P) -> Result<()> {
         let dotfile_path = dpath.as_ref();
         let file_metadata = dotfile_path
             .metadata()
@@ -151,8 +146,10 @@ impl App {
             .modified()
             .chain_err(|| "Can't access modification time")?;
 
-        let database_mtime = self.db.last_updated(&dotfile_path.to_owned())
-            .chain_err(|| ErrorKind::NotInDatabaseError)?;
+        let database_mtime = self
+            .db
+            .last_updated(&dotfile_path.to_owned())
+            .chain_err(|| "Path not in database")?;
         debug!("Database modification time: {:?}", database_mtime);
         debug!("Dotfile modification time: {:?}", file_mtime);
 
@@ -250,10 +247,8 @@ impl App {
                 .chain_err(|| "Error backing file up")?;
         }
 
-        ensure_parent_exists(&result_path)
-            .chain_err(|| "Could not create parent directories")?;
-        let mut file = File::create(&result_path)
-            .chain_err(|| "Could not create result file")?;
+        ensure_parent_exists(&result_path).chain_err(|| "Could not create parent directories")?;
+        let mut file = File::create(&result_path).chain_err(|| "Could not create result file")?;
         debug!("Writing template");
         write!(
             file,
@@ -261,9 +256,11 @@ impl App {
             handlebars
                 .render("file", &data)
                 .chain_err(|| "Could not render template")?
-        ).chain_err(|| "Error writing result file")?;
+        )
+        .chain_err(|| "Error writing result file")?;
 
-        self.db.touch(&result_path.as_ref().to_owned())
+        self.db
+            .touch(&result_path.as_ref().to_owned())
             .chain_err(|| "Error updating file modtime")?;
 
         Ok(())
@@ -334,19 +331,19 @@ impl App {
                 match relative.to_string_lossy().chars().nth(0) {
                     Some('.') => false,
                     None => false,
-                    _ => true
+                    _ => true,
                 }
             })
-            // .filter(|p| {
-            //     p
-            //         .ancestors()
-            //         .inspect(|a| trace!("Next path ancestor: {}", a.display()))
-            //         .filter_map(|a| a.file_name())
-            //         .inspect(|f| trace!("Last component: {:?}", f))
-            //         .map(|f| f.to_string_lossy().chars().nth(0))
-            //         .inspect(|c| trace!("First char: {:?}\n", c))
-            //         .all(|c| c != Some('.'))  // remove all hidden files
-            // })
+        // .filter(|p| {
+        //     p
+        //         .ancestors()
+        //         .inspect(|a| trace!("Next path ancestor: {}", a.display()))
+        //         .filter_map(|a| a.file_name())
+        //         .inspect(|f| trace!("Last component: {:?}", f))
+        //         .map(|f| f.to_string_lossy().chars().nth(0))
+        //         .inspect(|c| trace!("First char: {:?}\n", c))
+        //         .all(|c| c != Some('.'))  // remove all hidden files
+        // })
     }
 
     fn filename_to_dotfile<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
@@ -457,10 +454,12 @@ impl App {
         sanitize_file(&result_path)
             .chain_err(|| format!("Error sanitizing {}", result_path.display()))?;
 
-        let modtime = path.as_ref()
-            .metadata().chain_err(|| "Can't access file's metadata")?
-            .modified().chain_err(|| "Can't access file's modification time")?;
-
+        let modtime = path
+            .as_ref()
+            .metadata()
+            .chain_err(|| "Can't access file's metadata")?
+            .modified()
+            .chain_err(|| "Can't access file's modification time")?;
 
         let mut entry = Entry {
             template_path: result_path.clone(),
@@ -485,6 +484,51 @@ impl App {
         }
 
         self.db.add_entry(entry);
+
+        Ok(())
+    }
+
+    pub fn edit_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let path = PathAbs::new(&path)
+            .chain_err(|| {
+                format!(
+                    "Could not convert {} to absolute path",
+                    path.as_ref().display()
+                )
+            })?
+            .as_path()
+            .to_owned();
+        debug!("Database check of {}", path.display());
+        if !self.db.in_database(&path.to_owned()) {
+            let res = yes_no_prompt(&format!(
+                "File {} does not appear to be managed by rotfiles. Do you want to add it?",
+                path.display()
+            ))?;
+            if res {
+                self.add_file(&path, false)
+                    .chain_err(|| "Error adding file")?;
+            } else {
+                bail!("File not managed by rotfiles");
+            }
+        }
+
+        let template_path = self
+            .dotfile_to_filename(&path)
+            .chain_err(|| "Could not convert to template filename")?;
+        let editor = std::env::var("EDITOR").chain_err(|| "Could not get $EDITOR env variable")?;
+
+        match subprocess::Exec::cmd(editor)
+            .args(&[template_path.as_os_str()])
+            .join()
+            .chain_err(|| "Failed to edit")?
+        {
+            subprocess::ExitStatus::Exited(0) => (),
+            _ => bail!("Editor probably failed"),
+        }
+
+        println!("Applying template");
+        self.process_file(&template_path, &path)
+            .chain_err(|| "Error processing file after edit")?;
 
         Ok(())
     }
@@ -520,7 +564,11 @@ fn sanitize_file<P: AsRef<Path>>(path: P) -> Result<()> {
         )
     })?;
     write!(file, "{}", contents)?;
-    debug!("File {} sanitized with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
+    debug!(
+        "File {} sanitized with modtime {:?}",
+        path.as_ref().display(),
+        path.as_ref().metadata()?.modified()?
+    );
     Ok(())
 }
 
@@ -529,6 +577,33 @@ fn get_hostname() -> String {
     let mut f = File::open("/etc/hostname").unwrap();
     f.read_to_string(&mut result).unwrap();
     String::from(result.trim_end())
+}
+
+fn yes_no_prompt(prompt: &str) -> Result<bool> {
+    println!("{} [Yn]", prompt);
+    loop {
+        let mut line = String::new();
+        let bytes_read = std::io::stdin()
+            .read_line(&mut line)
+            .chain_err(|| "Could not read answer from stdin")?;
+        debug!("Read {} lines of answer", bytes_read);
+
+        if bytes_read == 2 {
+            // [yn] + newline  Gotta hope there is no windows users
+            let res = line.chars().nth(0).unwrap().to_lowercase().nth(0).unwrap();
+            if res == 'y' {
+                return Ok(true);
+            } else if res == 'n' {
+                return Ok(false);
+            }
+        }
+        if bytes_read == 1 {
+            // again, newline only
+            return Ok(true);
+        }
+
+        println!("{} is not a correct answer", &line);
+    }
 }
 
 #[cfg(test)]
@@ -542,10 +617,13 @@ mod tests {
             let mut file = File::create(&path)?;
             write!(file, "{}", contents)?;
         }
-        debug!("File {} created with modtime {:?}", path.as_ref().display(), path.as_ref().metadata()?.modified()?);
+        debug!(
+            "File {} created with modtime {:?}",
+            path.as_ref().display(),
+            path.as_ref().metadata()?.modified()?
+        );
         Ok(())
     }
-
 
     fn pretty_err_catcher<F: FnOnce() -> Result<()>>(func: F) {
         match func() {
@@ -785,16 +863,23 @@ mod tests {
             // probably not necessary
             std::thread::sleep(std::time::Duration::from_secs(1));
 
-            debug!("Dotfile modtime before adding: {:?}", dot_file_path.metadata()?.modified()?);
-            debug!("Dotfile modtime before adding: {:?}", dot_file_path.metadata()?.modified()?);
+            debug!(
+                "Dotfile modtime before adding: {:?}",
+                dot_file_path.metadata()?.modified()?
+            );
+            debug!(
+                "Dotfile modtime before adding: {:?}",
+                dot_file_path.metadata()?.modified()?
+            );
             app.add_file(&dot_file_path, false)
                 .chain_err(|| "Error adding file")?;
-            debug!("Dotfile modtime after adding: {:?}", dot_file_path.metadata()?.modified()?);
+            debug!(
+                "Dotfile modtime after adding: {:?}",
+                dot_file_path.metadata()?.modified()?
+            );
 
             let _res1 = app
-                .ensure_template_newer_than_file(
-                    &dot_file_path,
-                )
+                .ensure_template_newer_than_file(&dot_file_path)
                 .chain_err(|| format!("Template falsely marked as older"))?;
             // let _res2: std::result::Result<(), ()> = match app.ensure_template_newer_than_file(
             //     &dot_file_path,
@@ -807,9 +892,7 @@ mod tests {
                 .chain_err(|| "Error processing file")?;
 
             let _res3 = app
-                .ensure_template_newer_than_file(
-                    &dot_file_path,
-                )
+                .ensure_template_newer_than_file(&dot_file_path)
                 .chain_err(|| format!("Template falsely marked as older after processing"))?;
             // let _res4: std::result::Result<(), ()> = match app.ensure_template_newer_than_file(
             //     &dot_file_path,
@@ -817,7 +900,6 @@ mod tests {
             //     Err(_) => Ok(()),
             //     Ok(_) => bail!("Template falsely marked as correct (newer than file) after processing"),
             // };
-
 
             Ok(())
         });

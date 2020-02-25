@@ -1,15 +1,18 @@
-extern crate serde_json;
 extern crate serde;
+extern crate serde_json;
 
 use std::path::PathBuf;
 
-use serde::{Serialize, Deserialize};
-use std::io::prelude::*;
 use crate::errors::*;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::prelude::*;
 use std::time::SystemTime;
-use std::collections::{HashMap};
 
+use std::borrow::Borrow;
+use std::cmp::Eq;
 use std::fs::File;
+use std::hash::Hash;
 
 // For now the "Database" is gonna just be a json file
 
@@ -27,40 +30,29 @@ pub struct Database {
 }
 
 impl Database {
-
     pub fn connect(cfg: &crate::config::Config) -> Result<Self> {
         let fname = cfg.backup_path.join("database.json");
         Database::ensure_exists(cfg)?;
-        let file = File::open(&fname)
-            .chain_err(|| "Couldn't open database file")?;
-        let data = serde_json::from_reader(file)
-            .chain_err(|| "Error decoding")?;
+        let file = File::open(&fname).chain_err(|| "Couldn't open database file")?;
+        let data = serde_json::from_reader(file).chain_err(|| "Error decoding")?;
 
-        Ok(Self {
-            fname,
-            data,
-        })
+        Ok(Self { fname, data })
     }
 
     fn ensure_exists(cfg: &crate::config::Config) -> Result<()> {
         let fname = cfg.backup_path.join("database.json");
         if !fname.exists() {
             crate::ensure_parent_exists(&fname)?;
-            let mut file = File::create(fname)
-                .chain_err(|| "Could not open database.json")?;
-            write!(file, "{{}}")
-                .chain_err(|| "Error writing empty database file")
-        }
-        else {
+            let mut file = File::create(fname).chain_err(|| "Could not open database.json")?;
+            write!(file, "{{}}").chain_err(|| "Error writing empty database file")
+        } else {
             Ok(())
         }
     }
 
     pub fn commit(&self) -> Result<()> {
-        let file = File::create(&self.fname)
-            .chain_err(|| "Couldn't overwrite database file")?;
-        serde_json::to_writer_pretty(file, &self.data)
-            .chain_err(|| "Error writing data")?;
+        let file = File::create(&self.fname).chain_err(|| "Couldn't overwrite database file")?;
+        serde_json::to_writer_pretty(file, &self.data).chain_err(|| "Error writing data")?;
 
         Ok(())
     }
@@ -71,7 +63,7 @@ impl Database {
                 e.last_updated = SystemTime::now();
                 Ok(())
             }
-            None => Err("File to be touched is not in database".into())
+            None => Err("File to be touched is not in database".into()),
         };
         self.log_contents();
         res
@@ -83,6 +75,14 @@ impl Database {
             res += &format!("{} -> {:?}\n", k.display(), v.last_updated);
         }
         trace!("Database contents:\n{}", res);
+    }
+
+    pub fn in_database<P>(&self, path: &P) -> bool
+    where
+        PathBuf: Borrow<P>,
+        P: Hash + Eq,
+    {
+        self.data.contains_key(path)
     }
 
     pub fn add_entry(&mut self, e: Entry) -> Option<Entry> {
@@ -121,6 +121,4 @@ impl Drop for Database {
 }
 
 #[cfg(test)]
-mod tests {
-
-}
+mod tests {}
