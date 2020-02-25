@@ -44,6 +44,10 @@ pub mod errors {
                 description("File has been changed from under its template"),
                 display("File {} is newer than its template", fname),
             }
+            
+            NotInDatabaseError {
+                description("File not in database")
+            }
 
         }
         foreign_links {
@@ -202,10 +206,21 @@ impl App {
     {
         let mut handlebars = Handlebars::new();
 
-        if result_path.as_ref().exists() {
-            self.ensure_template_newer_than_file(&result_path)
-                .chain_err(|| "Error comparing modification times")?;
-        } else {
+        debug!("Database check on file {}", result_path.as_ref().display());
+        let add_entry = !result_path.as_ref().exists() || match self.ensure_template_newer_than_file(&result_path) {
+            Ok(_) => {
+                debug!("No error on check");
+                false
+            },
+            Err(Error(ErrorKind::NotInDatabaseError, _)) => {
+                debug!("Not in database");
+                true
+            },
+            Err(_) => bail!("Error comparing modification times"),
+        };
+        
+        if add_entry {
+            debug!("File {} not in database. Adding", result_path.as_ref().display());
             self.db.add_entry(Entry {
                 template_path: template_path.as_ref().to_path_buf(),
                 config_path: None,
