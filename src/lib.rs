@@ -488,6 +488,31 @@ impl App {
         Ok(())
     }
 
+    pub fn remove_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let dot_path = match self.filename_to_dotfile(&path) {
+            Ok(p) => p,
+            Err(_) => path.as_ref().to_path_buf()
+        };
+        debug!("Attempting to remove {}", dot_path.display());
+
+        let template_path = self.dotfile_to_filename(&dot_path).unwrap();
+        let json_fname = self.json_filename(&template_path);
+
+        self.db.rm_key(&dot_path);
+
+        if json_fname.exists() {
+            debug!("Removing {}", json_fname.display());
+            std::fs::remove_file(&json_fname)
+            .chain_err(|| format!("Could not remove file {}", json_fname.display()))?;
+        }
+        debug!("Removing {}", template_path.display());
+        std::fs::remove_file(&template_path)
+            .chain_err(|| "Could not remove file template")?;
+
+
+        Ok(())
+    }
+
     pub fn edit_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = PathAbs::new(&path)
             .chain_err(|| {
@@ -531,6 +556,12 @@ impl App {
             .chain_err(|| "Error processing file after edit")?;
 
         Ok(())
+    }
+
+    fn json_filename<P: AsRef<Path>> (&self, path: P) -> PathBuf {
+        let mut res = path.as_ref().as_os_str().to_owned();
+        res.push(".json");
+        res.into()
     }
 }
 
@@ -946,5 +977,85 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_rm_file_no_config() {
+        let _ = pretty_env_logger::try_init();
+        pretty_err_catcher(|| {
+            let mut app = App::new_test()?;
+
+            let dotfile_path = app.cfg.home_path.join(".test_rm_no_config");
+            create_file_with_contents(&dotfile_path, "")?;
+            let template_path = app.dotfile_to_filename(&dotfile_path)?;
+
+            app.add_file(&dotfile_path, false)?;
+            assert!(app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(template_path.exists());
+
+            app.remove_file(&dotfile_path)?;
+            assert!(!app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(!template_path.exists());
+
+
+            app.add_file(&dotfile_path, false)?;
+            assert!(app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(template_path.exists());
+
+
+            app.remove_file(&app.dotfile_to_filename(&dotfile_path)?)?;
+            assert!(!app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(!template_path.exists());
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_rm_file_with_config() {
+        let _ = pretty_env_logger::try_init();
+        pretty_err_catcher(|| {
+            let mut app = App::new_test()?;
+
+            let dotfile_path = app.cfg.home_path.join(".test_rm_no_config");
+            create_file_with_contents(&dotfile_path, "")?;
+            let template_path = app.dotfile_to_filename(&dotfile_path)?;
+            let json_path = app.json_filename(&template_path);
+            dbg!(json_path.display());
+            dbg!(template_path.display());
+
+            app.add_file(&dotfile_path, true)?;
+            assert!(app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(template_path.exists());
+            assert!(json_path.exists());
+
+            app.remove_file(&dotfile_path)?;
+            assert!(!app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(!template_path.exists());
+            assert!(!json_path.exists());
+
+
+            app.add_file(&dotfile_path, true)?;
+            assert!(app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(template_path.exists());
+            assert!(json_path.exists());
+
+
+            app.remove_file(&app.dotfile_to_filename(&dotfile_path)?)?;
+            assert!(!app.db.in_database(&dotfile_path));
+            assert!(dotfile_path.exists());
+            assert!(!template_path.exists());
+            assert!(!json_path.exists());
+
+            Ok(())
+        });
+
     }
 }

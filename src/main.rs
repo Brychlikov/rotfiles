@@ -15,6 +15,7 @@ enum Rotfiles {
     Add { fname: PathBuf },
     Update,
     Edit { fname: PathBuf },
+    Remove { fname: PathBuf },
 }
 
 fn main() {
@@ -53,6 +54,9 @@ fn run() -> rotfiles::errors::Result<()> {
         Rotfiles::Edit { fname } => {
             println!("Editing file: {}", fname.display());
             app.edit_file(&fname)?;
+        }
+        Rotfiles::Remove { fname } => {
+            app.remove_file(&fname)?;
         }
     }
 
