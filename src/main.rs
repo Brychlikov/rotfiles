@@ -1,19 +1,11 @@
-#![allow(unused_imports)]
 extern crate handlebars;
-#[macro_use]
 extern crate serde_json;
-#[macro_use]
 extern crate structopt;
 #[macro_use]
 extern crate log;
 extern crate pretty_env_logger;
-use handlebars::Handlebars;
-use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 
-use serde_json::Value as Json;
-use std::fs::File;
-use std::io::prelude::*;
 use structopt::StructOpt;
 
 use rotfiles::errors::*;
